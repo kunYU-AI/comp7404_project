@@ -175,20 +175,35 @@ class BoosterTree:
         """稀疏分裂寻找"""
         best_gain = 0.0
         total_g, total_h = g.sum(), h.sum()
+
         for feature in feature_indices:
-            sum_g_left, sum_h_left = 0.0, 0.0
+            
             # exclude the missing values in X
             non_miss_indices = X[:, feature] != '?'
-            asc_sorted_idx = np.argsort(X[non_miss_indices, feature])
-            X_asc_sorted = X[asc_sorted_idx, feature]
+            X_non_miss = X[non_miss_indices, feature]
+            g_non_miss = g[non_miss_indices]
+            h_non_miss = h[non_miss_indices]
+            
+            if len(X_non_miss) == 0:
+                continue 
 
             # 1.所有missing value在右侧，所以我们从左侧累积
+            asc_sorted_idx = np.argsort(X_non_miss)
+            X_asc_sorted = X_non_miss[asc_sorted_idx]
+            g_sorted = g_non_miss[asc_sorted_idx]
+            h_sorted = h_non_miss[asc_sorted_idx]
+
+            sum_g_left, sum_h_left = 0.0, 0.0
             for i in range(1, len(X_asc_sorted)):
-                sum_g_left += g[asc_sorted_idx][i-1]
-                sum_h_left += h[asc_sorted_idx][i-1]
+                sum_g_left += g_sorted[i-1]
+                sum_h_left += h_sorted[i-1]
                 sum_g_right = total_g - sum_g_left
                 sum_h_right = total_h - sum_h_left
                 
+                # 检查最小子节点权重约束
+                if sum_h_left < self.min_child_weight or sum_h_right < self.min_child_weight:
+                    continue
+
                 # 计算Loss reduction
                 gain = 0.5 * ((sum_g_left**2 / (sum_h_left + self.reg_lambda) +
                         sum_g_right**2 / (sum_h_right + self.reg_lambda) -
@@ -201,15 +216,21 @@ class BoosterTree:
 
             # 2.所有missing value在左侧，所以我们从右侧累积
             desc_sorted_idx = asc_sorted_idx[::-1]
-            X_desc_sorted = X[desc_sorted_idx, feature]
+            X_desc_sorted = X_non_miss[desc_sorted_idx]
+            g_desc_sorted = g_non_miss[desc_sorted_idx]
+            h_desc_sorted = h_non_miss[desc_sorted_idx]
 
             sum_g_right, sum_h_right = 0.0, 0.0
             for i in range(1, len(X_desc_sorted)):
-                sum_g_right += g[desc_sorted_idx][i-1]
-                sum_h_right += h[desc_sorted_idx][i-1]
+                sum_g_right += g_desc_sorted[i-1]
+                sum_h_right += h_desc_sorted[i-1]
                 sum_g_left = total_g - sum_g_right
                 sum_h_left = total_h - sum_h_right
                 
+                # 检查最小子节点权重约束
+                if sum_h_left < self.min_child_weight or sum_h_right < self.min_child_weight:
+                    continue
+
                 # 计算Loss reduction
                 gain = 0.5 * ((sum_g_left**2 / (sum_h_left + self.reg_lambda) +
                         sum_g_right**2 / (sum_h_right + self.reg_lambda) -

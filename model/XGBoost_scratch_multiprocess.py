@@ -66,6 +66,21 @@ class BoostTreeNode:
         self.default_left = default_left
         self.best_gain = 0.0
 
+# 生成单个树，包括方法：
+# 1.Exact Split Finding
+# 2.Approximate Split Finding
+# 3.Sparse Split Finding
+# 4.并行多线程处理
+class BoostTreeNode:
+    def __init__(self, feature_idx=None, threshold=None, left=None, right=None, value=None, default_left=None):
+        self.feature_idx = feature_idx
+        self.threshold = threshold
+        self.left = left
+        self.right = right
+        self.value = value
+        self.default_left = default_left
+        self.best_gain = 0.0
+
 class BoosterTree:
     def __init__(self, params, n_threads=1):  # 修改构造函数，移除column_blocks
         self.root = None
@@ -143,7 +158,7 @@ class BoosterTree:
             node.feature_idx, node.threshold, node.best_gain = best_feature, best_threshold, best_gain
             node.default_left = best_default_left
             feature_values = self.X[sample_indices, best_feature]
-            miss_mask = np.isnan(feature_values)
+            miss_mask = np.isnan(feature_values) | (feature_values == 0.0)
             left_mask = ((feature_values <= best_threshold) & ~miss_mask) | (miss_mask & best_default_left)
             right_mask = ~left_mask
         
@@ -188,15 +203,15 @@ class BoosterTree:
         total_g, total_h = g.sum(), h.sum()
         best_gain, best_feature, best_threshold = 0.0, None, None
         
-        for fidx in feature_indices:
+        def process_feature(fidx):
             block = column_blocks[fidx]
             values, local_indices = block.get_non_missing()
             if len(values) == 0:
-                continue
+                return 0.0, None, None
                 
             candidates = self.quantile_sketch.get_candidates(fidx)
             if len(candidates) == 0:
-                continue
+                return 0.0, None, None
             
             for thresh in candidates:
                 left_mask = (values <= thresh) & local_indices
@@ -213,45 +228,89 @@ class BoosterTree:
                 ) - self.gamma
                 if gain > best_gain:
                     best_gain, best_feature, best_threshold = gain, fidx, thresh
-        return best_gain, best_feature, best_threshold
+            
+            return best_gain, best_feature, best_threshold
     
+        with ThreadPoolExecutor(self.n_threads) as executor:
+            results = list(executor.map(process_feature, feature_indices))
+        best_result = max(results, key=lambda x: x[0])
+        return best_result[0], best_result[1], best_result[2]
+
     def _find_split_sparse(self, column_blocks, g, h, feature_indices, exact=True):
         total_g, total_h = g.sum(), h.sum()
         
-        def process_feature(fidx):
-            block = column_blocks[fidx]
-            values, local_indices = block.get_non_missing()
-            if len(values) == 0:
-                return 0.0, None, None, None
-            
-            g_non_miss = g[local_indices]
-            h_non_miss = h[local_indices]
-            miss_mask = block.missing_mask
-            miss_indices = block.sorted_idx[miss_mask]
-            sum_g_miss = g[miss_indices].sum() if len(miss_indices) > 0 else 0.0
-            sum_h_miss = h[miss_indices].sum() if len(miss_indices) > 0 else 0.0
-            has_missing = (sum_g_miss != 0) or (sum_h_miss != 0)
-            
-            if exact:
-                sorted_idx = np.argsort(values)
-                g_sorted = g_non_miss[sorted_idx]
-                h_sorted = h_non_miss[sorted_idx]
-                values_sorted = values[sorted_idx]
-                best_gain, best_threshold, best_default_left = 0.0, None, None
-                sum_g_left, sum_h_left = 0.0, 0.0
+        def process_feature(feature_batch):
+            result = []
+            for fidx in feature_batch:
+                block = column_blocks[fidx]
+                values, local_indices = block.get_non_missing()
+                if len(values) == 0:
+                    return 0.0, None, None, None
                 
-                for i in range(1, len(values_sorted)):
-                    sum_g_left += g_sorted[i-1]
-                    sum_h_left += h_sorted[i-1]
-                    sum_g_right = total_g - sum_g_left - sum_g_miss
-                    sum_h_right = total_h - sum_h_left - sum_h_miss
-                    if (values_sorted[i] == values_sorted[i-1] or
-                        sum_h_left < self.min_child_weight or
-                        sum_h_right < self.min_child_weight):
-                        continue
+                g_non_miss = g[local_indices]
+                h_non_miss = h[local_indices]
+                miss_mask = block.missing_mask
+                miss_indices = block.sorted_idx[miss_mask]
+                sum_g_miss = g[miss_indices].sum() if len(miss_indices) > 0 else 0.0
+                sum_h_miss = h[miss_indices].sum() if len(miss_indices) > 0 else 0.0
+                has_missing = (sum_g_miss != 0) or (sum_h_miss != 0)
+                
+                if exact:
+                    sorted_idx = np.argsort(values)
+                    g_sorted = g_non_miss[sorted_idx]
+                    h_sorted = h_non_miss[sorted_idx]
+                    values_sorted = values[sorted_idx]
+                    best_gain, best_threshold, best_default_left = 0.0, None, None
+                    sum_g_left, sum_h_left = 0.0, 0.0
                     
-                    if has_missing:
-                        # 处理两种情况：缺失值默认左或右
+                    for i in range(1, len(values_sorted)):
+                        sum_g_left += g_sorted[i-1]
+                        sum_h_left += h_sorted[i-1]
+                        sum_g_right = total_g - sum_g_left - sum_g_miss
+                        sum_h_right = total_h - sum_h_left - sum_h_miss
+                        if (values_sorted[i] == values_sorted[i-1] or
+                            sum_h_left < self.min_child_weight or
+                            sum_h_right < self.min_child_weight):
+                            continue
+                        
+                        if has_missing:
+                            # 处理两种情况：缺失值默认左或右
+                            gain_left = 0.5 * (
+                                (sum_g_left + sum_g_miss)**2 / (sum_h_left + sum_h_miss + self.reg_lambda) +
+                                sum_g_right**2 / (sum_h_right + self.reg_lambda) -
+                                total_g**2 / (total_h + self.reg_lambda)
+                            ) - self.gamma
+                            gain_right = 0.5 * (
+                                sum_g_left**2 / (sum_h_left + self.reg_lambda) +
+                                (sum_g_right + sum_g_miss)**2 / (sum_h_right + sum_h_miss + self.reg_lambda) -
+                                total_g**2 / (total_h + self.reg_lambda)
+                            ) - self.gamma
+                            current_gain = max(gain_left, gain_right)
+                            default_left = gain_left > gain_right
+                        else:
+                            # 无缺失值时，仅计算一次增益
+                            current_gain = 0.5 * (
+                                sum_g_left**2 / (sum_h_left + self.reg_lambda) +
+                                sum_g_right**2 / (sum_h_right + self.reg_lambda) -
+                                total_g**2 / (total_h + self.reg_lambda)
+                            ) - self.gamma
+                            default_left = False  # 无影响，可设为任意值
+
+                        if current_gain > best_gain:
+                            best_gain = current_gain
+                            best_threshold = (values_sorted[i-1] + values_sorted[i]) / 2
+                            best_default_left = default_left if has_missing else True
+                else:
+                    candidates = self.quantile_sketch.get_candidates(fidx)
+                    best_gain, best_threshold, best_default_left = 0.0, None, None
+                    for thresh in candidates:
+                        left_mask = (values <= thresh) & local_indices
+                        sum_g_left = g_non_miss[left_mask].sum()
+                        sum_h_left = h_non_miss[left_mask].sum()
+                        sum_g_right = total_g - sum_g_left - sum_g_miss
+                        sum_h_right = total_h - sum_h_left - sum_h_miss
+                        if sum_h_left < self.min_child_weight or sum_h_right < self.min_child_weight:
+                            continue
                         gain_left = 0.5 * (
                             (sum_g_left + sum_g_miss)**2 / (sum_h_left + sum_h_miss + self.reg_lambda) +
                             sum_g_right**2 / (sum_h_right + self.reg_lambda) -
@@ -262,52 +321,19 @@ class BoosterTree:
                             (sum_g_right + sum_g_miss)**2 / (sum_h_right + sum_h_miss + self.reg_lambda) -
                             total_g**2 / (total_h + self.reg_lambda)
                         ) - self.gamma
-                        current_gain = max(gain_left, gain_right)
-                        default_left = gain_left > gain_right
-                    else:
-                        # 无缺失值时，仅计算一次增益
-                        current_gain = 0.5 * (
-                            sum_g_left**2 / (sum_h_left + self.reg_lambda) +
-                            sum_g_right**2 / (sum_h_right + self.reg_lambda) -
-                            total_g**2 / (total_h + self.reg_lambda)
-                        ) - self.gamma
-                        default_left = False  # 无影响，可设为任意值
-
-                    if current_gain > best_gain:
-                        best_gain = current_gain
-                        best_threshold = (values_sorted[i-1] + values_sorted[i]) / 2
-                        best_default_left = default_left if has_missing else True
-            else:
-                candidates = self.quantile_sketch.get_candidates(fidx)
-                best_gain, best_threshold, best_default_left = 0.0, None, None
-                for thresh in candidates:
-                    left_mask = (values <= thresh) & local_indices
-                    sum_g_left = g_non_miss[left_mask].sum()
-                    sum_h_left = h_non_miss[left_mask].sum()
-                    sum_g_right = total_g - sum_g_left - sum_g_miss
-                    sum_h_right = total_h - sum_h_left - sum_h_miss
-                    if sum_h_left < self.min_child_weight or sum_h_right < self.min_child_weight:
-                        continue
-                    gain_left = 0.5 * (
-                        (sum_g_left + sum_g_miss)**2 / (sum_h_left + sum_h_miss + self.reg_lambda) +
-                        sum_g_right**2 / (sum_h_right + self.reg_lambda) -
-                        total_g**2 / (total_h + self.reg_lambda)
-                    ) - self.gamma
-                    gain_right = 0.5 * (
-                        sum_g_left**2 / (sum_h_left + self.reg_lambda) +
-                        (sum_g_right + sum_g_miss)**2 / (sum_h_right + sum_h_miss + self.reg_lambda) -
-                        total_g**2 / (total_h + self.reg_lambda)
-                    ) - self.gamma
-                    if gain_left > best_gain:
-                        best_gain, best_threshold = gain_left, thresh
-                        best_default_left = True
-                    if gain_right > best_gain:
-                        best_gain, best_threshold = gain_right, thresh
-                        best_default_left = False
-            return best_gain, fidx, best_threshold, best_default_left
+                        if gain_left > best_gain:
+                            best_gain, best_threshold = gain_left, thresh
+                            best_default_left = True
+                        if gain_right > best_gain:
+                            best_gain, best_threshold = gain_right, thresh
+                            best_default_left = False
+                result.append((best_gain, fidx, best_threshold, best_default_left))
         
+            return result
+        
+        feature_batches = np.array_split(feature_indices, self.n_threads)
         with ThreadPoolExecutor(self.n_threads) as executor:
-            results = list(executor.map(process_feature, feature_indices))
+            results = list(executor.map(process_feature, feature_batches))
         best_result = max(results, key=lambda x: x[0])
         return best_result[0], best_result[1], best_result[2], best_result[3]
 

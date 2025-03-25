@@ -10,3 +10,9 @@ model_version/v1_初版.py
 model_version/v2.1_index报错.py
 model_version/v2.2_exact_索引.ipynb
 model_version/v2_各类功能.ipynb
+model_version/v5可并行_但sparse消耗大.ipynb
+.gitignore
+model_version/v4_并行问题解决_索引报错.ipynb
+model_version/v3.1_仍然有并行超时.ipynb
+model_version/v3_未使用numba并行.ipynb
+model_version/v4.1可运行_但不同算法时间差.ipynb

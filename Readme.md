@@ -1,6 +1,6 @@
 ## file path
 1. codes:
-    - XGBoost_Allstate.py: experiements with xgboost on Allstate dataset
+    - XGBoost_Allstate.py: XGBoost model from scratch + experiements with xgboost on Allstate dataset
     - xgboost_higgsboson.py: experiements with xgboost on Higgs dataset
     - xgboost_ltrcYahoo.py: experiements with xgboost on Yahoo LTR dataset
 2. dataset:
